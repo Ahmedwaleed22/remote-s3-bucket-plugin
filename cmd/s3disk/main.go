@@ -10,11 +10,28 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 )
 
-// version is overridden at build time with -ldflags "-X main.version=...".
-var version = "dev"
+// version is stamped at build time with -ldflags "-X main.version=...".
+// It is empty for a binary produced by `go install module@version`, which
+// cannot pass ldflags — resolvedVersion falls back to the module version Go
+// records in the build info, so an installed binary still reports what it is.
+var version = ""
+
+// resolvedVersion reports the build's version, preferring an explicit stamp.
+func resolvedVersion() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return "dev"
+}
 
 func main() {
 	// Support being invoked as a mount(8) helper:
@@ -45,7 +62,7 @@ func main() {
 	case "doctor":
 		code = runDoctor(args)
 	case "version", "--version", "-v":
-		fmt.Printf("s3disk %s\n", version)
+		fmt.Printf("s3disk %s\n", resolvedVersion())
 	case "help", "--help", "-h":
 		usage()
 	default:
