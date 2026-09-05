@@ -126,7 +126,22 @@ func Default() *Config {
 // and returns the bucket plus a normalised prefix ("" or "dir/subdir/").
 func ParseS3URL(s string) (bucket, prefix string, err error) {
 	raw := strings.TrimSpace(s)
-	raw = strings.TrimPrefix(raw, "s3://")
+	if raw == "" {
+		return "", "", fmt.Errorf("empty bucket specification")
+	}
+	if after, ok := strings.CutPrefix(raw, "s3://"); ok {
+		raw = after
+	} else if scheme, _, ok := strings.Cut(raw, "://"); ok {
+		// Pasting the provider's endpoint here is the easy mistake to make, and
+		// the old parser accepted it: "https://s3.example.com" split on the
+		// first colon and became the bucket "https". That produced a mount that
+		// failed later against the wrong service, with nothing pointing back at
+		// the real cause.
+		return "", "", fmt.Errorf(
+			"%q is a %s:// URL, not a bucket: give the bucket as s3://bucket/prefix "+
+				"(or just bucket/prefix), and pass the provider's endpoint separately "+
+				"with --endpoint", s, scheme)
+	}
 	if raw == "" {
 		return "", "", fmt.Errorf("empty bucket specification")
 	}

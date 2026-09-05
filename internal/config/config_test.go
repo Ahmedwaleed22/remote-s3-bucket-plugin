@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseS3URL(t *testing.T) {
 	cases := []struct {
@@ -20,6 +23,11 @@ func TestParseS3URL(t *testing.T) {
 		{in: "", wantErr: true},
 		{in: "s3://", wantErr: true},
 		{in: "s3:///prefix", wantErr: true},
+		// A provider endpoint pasted into the bucket field. This used to parse
+		// as the bucket "https", producing a mount aimed at the wrong service.
+		{in: "https://de-s3.storage.bunnycdn.com", wantErr: true},
+		{in: "http://minio:9000", wantErr: true},
+		{in: "https://s3.us-west-2.amazonaws.com/my-bucket", wantErr: true},
 	}
 	for _, c := range cases {
 		bucket, prefix, err := ParseS3URL(c.in)
@@ -35,6 +43,20 @@ func TestParseS3URL(t *testing.T) {
 		}
 		if bucket != c.bucket || prefix != c.prefix {
 			t.Errorf("ParseS3URL(%q) = %q, %q; want %q, %q", c.in, bucket, prefix, c.bucket, c.prefix)
+		}
+	}
+}
+
+// The message has to name the mistake, because the failure it prevents shows
+// up much later and somewhere else — as an auth error against the wrong host.
+func TestParseS3URLExplainsAnEndpointInTheBucketField(t *testing.T) {
+	_, _, err := ParseS3URL("https://de-s3.storage.bunnycdn.com")
+	if err == nil {
+		t.Fatal("expected an error for an endpoint URL")
+	}
+	for _, want := range []string{"URL", "endpoint", "s3://bucket"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
 		}
 	}
 }
