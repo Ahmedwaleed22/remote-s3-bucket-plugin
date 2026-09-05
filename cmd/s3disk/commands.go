@@ -290,13 +290,26 @@ func runDoctor(args []string) int {
 		if err := cfg.Validate(); err != nil {
 			return fatalf("%v", err)
 		}
+		// Say what is actually being contacted. A wrong endpoint is the most
+		// common failure with a non-AWS provider, and it is invisible unless
+		// the value in use is printed back.
+		target := "AWS S3 (no endpoint set)"
+		if cfg.Endpoint != "" {
+			target = cfg.Endpoint
+		}
+		fmt.Printf("  via   %s  region=%s  path-style=%v\n", target, cfg.Region, cfg.PathStyle)
+
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		client, err := newDoctorClient(ctx, cfg)
 		check("client created", err, "")
 		if err == nil {
-			check("bucket readable", client.CheckAccess(ctx),
-				"verify the bucket name, region, endpoint and credentials")
+			accessErr := client.CheckAccess(ctx)
+			hint := ""
+			if accessErr != nil {
+				hint = diagnoseAccess(ctx, cfg)
+			}
+			check("bucket readable", accessErr, hint)
 		}
 	}
 
@@ -307,6 +320,32 @@ func runDoctor(args []string) int {
 	}
 	fmt.Printf("%d check(s) failed\n", failures)
 	return 1
+}
+
+// diagnoseAccess turns a failed bucket check into advice.
+//
+// Rather than guess, it retries with the other addressing style: most non-AWS
+// providers do not resolve virtual-host names like bucket.example.com, and the
+// resulting DNS timeout looks nothing like "you need --path-style". If the
+// retry succeeds, that is the answer, and it is a fact rather than a hunch.
+func diagnoseAccess(ctx context.Context, cfg *config.Config) string {
+	if cfg.Endpoint != "" && !cfg.PathStyle {
+		probe := *cfg
+		probe.PathStyle = true
+		pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		if client, err := newDoctorClient(pctx, &probe); err == nil {
+			if client.CheckAccess(pctx) == nil {
+				return "the bucket IS reachable with path-style addressing — " +
+					"add --path-style to the mount options (most non-AWS providers need it)"
+			}
+		}
+	}
+	if cfg.Endpoint == "" {
+		return "check the bucket name, the region, and the credentials"
+	}
+	return "check that the bucket exists at " + cfg.Endpoint + ", that the region is " +
+		"the one it lives in, and that the credentials are for that provider"
 }
 
 // newDoctorClient builds a client for the doctor's connectivity check.
