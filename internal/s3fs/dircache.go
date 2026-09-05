@@ -81,6 +81,55 @@ func (c *dirCache) clear() {
 	c.m = make(map[string]*dirCacheEntry)
 }
 
+// add records a child this mount just created. Updating the cached listing
+// beats dropping it: a create is followed by more lookups in the same
+// directory, and a dropped listing turns every one of those into a round trip.
+// The mount is the only thing that can change the directory, so the updated
+// listing is as correct as a re-read would be.
+func (c *dirCache) add(p string, entry fuse.DirEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[p]
+	if !ok {
+		return // nothing cached for this directory; nothing to keep current
+	}
+	for _, existing := range e.entries {
+		if existing.Name == entry.Name {
+			return
+		}
+	}
+	// Copy: a reader may still hold the slice this listing was returned as.
+	next := make([]fuse.DirEntry, len(e.entries), len(e.entries)+1)
+	copy(next, e.entries)
+	c.m[p] = &dirCacheEntry{entries: append(next, entry), expires: e.expires}
+}
+
+// remove records a child this mount just deleted.
+func (c *dirCache) remove(p, name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[p]
+	if !ok {
+		return
+	}
+	next := make([]fuse.DirEntry, 0, len(e.entries))
+	for _, existing := range e.entries {
+		if existing.Name != name {
+			next = append(next, existing)
+		}
+	}
+	c.m[p] = &dirCacheEntry{entries: next, expires: e.expires}
+}
+
+// seed records that a directory this mount just created is empty. Every lookup
+// inside it can then be answered locally until something is put there, which is
+// what makes writing a tree of new files cheap.
+func (c *dirCache) seed(p string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[p] = &dirCacheEntry{entries: []fuse.DirEntry{}, expires: time.Now().Add(c.ttl)}
+}
+
 func (c *dirCache) invalidate(p string) {
 	c.mu.Lock()
 	delete(c.m, p)

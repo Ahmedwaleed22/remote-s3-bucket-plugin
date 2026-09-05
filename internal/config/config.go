@@ -77,6 +77,8 @@ type Config struct {
 	Exclusive bool
 
 	// Write-back
+	AsyncWriteback     bool
+	UploadWorkers      int
 	DirtyTimeout       time.Duration
 	MultipartThreshold int64
 	PartSize           int64
@@ -113,6 +115,7 @@ func Default() *Config {
 		AttrWorkers:        32,
 		SyncMetadata:       true,
 		DirtyTimeout:       3 * time.Second,
+		UploadWorkers:      16,
 		MultipartThreshold: 16 << 20,
 		PartSize:           16 << 20,
 		UploadConcurrency:  4,
@@ -255,6 +258,9 @@ func (c *Config) Validate() error {
 	}
 	if c.UploadConcurrency < 1 {
 		c.UploadConcurrency = 1
+	}
+	if c.UploadWorkers < 1 {
+		c.UploadWorkers = 1
 	}
 	if c.CacheDir == "" {
 		c.CacheDir = DefaultCacheDir(c.Bucket, c.Prefix)

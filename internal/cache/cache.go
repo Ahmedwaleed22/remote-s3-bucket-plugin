@@ -39,6 +39,13 @@ type Options struct {
 	Readahead    int64
 	DirtyTimeout time.Duration
 	Persist      bool
+	// AsyncWriteback lets close(2) return before the object has been stored,
+	// leaving the upload to the background flusher. A build that writes
+	// hundreds of files then stops blocking on a round trip per file; the cost
+	// is that a file is durable a few seconds after close rather than at it.
+	AsyncWriteback bool
+	// UploadWorkers bounds how many write-backs run at once.
+	UploadWorkers int
 	// ReadOnly stops the cache from ever writing to S3. Locally recovered data
 	// stays dirty on disk so that a later read-write mount can upload it.
 	ReadOnly bool
@@ -335,13 +342,38 @@ func (c *Cache) FlushAll(ctx context.Context) error {
 		list = append(list, e)
 	}
 	c.mu.Unlock()
-	var firstErr error
-	for _, e := range list {
-		if err := e.Flush(ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
+
+	workers := c.opts.UploadWorkers
+	if workers < 1 {
+		workers = 1
 	}
-	return firstErr
+	if workers > len(list) {
+		workers = len(list)
+	}
+	if workers == 0 {
+		return nil
+	}
+	queue := make(chan *Entry)
+	errs := make(chan error, len(list))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for e := range queue {
+				if err := e.Flush(ctx); err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	for _, e := range list {
+		queue <- e
+	}
+	close(queue)
+	wg.Wait()
+	close(errs)
+	return <-errs
 }
 
 // Bytes reports the local disk currently used by cached data. Unlike Stats it
@@ -442,16 +474,49 @@ func (c *Cache) flushLoop() {
 			}
 			hadDirty = dirty > 0
 
-			for _, e := range due {
+			c.flushBatch(due)
+		}
+	}
+}
+
+// flushBatch uploads entries concurrently. Write-back is round-trip bound, so
+// doing it one at a time makes a build that writes many files as slow as the
+// sum of its uploads rather than the slowest few.
+func (c *Cache) flushBatch(due []*Entry) {
+	workers := c.opts.UploadWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(due) {
+		workers = len(due)
+	}
+	if workers == 0 {
+		return
+	}
+	queue := make(chan *Entry)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for e := range queue {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 				if err := e.Flush(ctx); err != nil {
 					c.opts.Log("cache: background flush of %s failed: %v", e.Key(), err)
 				}
 				cancel()
 			}
-		}
+		}()
 	}
+	for _, e := range due {
+		queue <- e
+	}
+	close(queue)
+	wg.Wait()
 }
+
+// AsyncWriteback reports whether close(2) may return before the upload.
+func (c *Cache) AsyncWriteback() bool { return c.opts.AsyncWriteback }
 
 // evict drops clean, unreferenced entries, least recently used first, until the
 // cache is back under budget. Candidates are collected and sorted once, rather

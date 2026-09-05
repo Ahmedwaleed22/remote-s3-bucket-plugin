@@ -272,7 +272,7 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	}
 	n.fsys.attrs.putSticky(p, a)
 	n.fsys.markPending(dir, name)
-	n.fsys.invalidateDir(dir)
+	n.fsys.dirs.add(dir, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG})
 
 	a.Fill(&out.Attr)
 	child := n.childInode(ctx, name, a)
@@ -348,15 +348,32 @@ func (n *Node) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	if h.entry.Untouched() {
 		return 0
 	}
+	// With asynchronous write-back the entry stays dirty and the background
+	// flusher stores it, in parallel with everything else closed around the
+	// same time. It is already durable on local disk and recorded in the cache
+	// index, so a mount that dies before the upload recovers it on the next
+	// start.
+	if n.fsys.cache.AsyncWriteback() {
+		return 0
+	}
 	if err := h.entry.Flush(ctx); err != nil {
 		return n.fsys.toErrno("flush "+h.path, err)
 	}
 	return 0
 }
 
-// Fsync forces a write-back.
+// Fsync forces a write-back. Unlike close, this is synchronous even with
+// asynchronous write-back configured: a caller asking for fsync is asking for
+// durability, not for speed.
 func (n *Node) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {
-	return n.Flush(ctx, fh)
+	h, ok := fh.(*fileHandle)
+	if !ok || h == nil {
+		return 0
+	}
+	if err := h.entry.Flush(ctx); err != nil {
+		return n.fsys.toErrno("fsync "+h.path, err)
+	}
+	return 0
 }
 
 // Release drops the handle's reference on the cached file, uploading anything
@@ -366,7 +383,10 @@ func (n *Node) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	if !ok || h == nil {
 		return 0
 	}
-	err := h.entry.Flush(ctx)
+	var err error
+	if !n.fsys.cache.AsyncWriteback() {
+		err = h.entry.Flush(ctx)
+	}
 	h.entry.Unref()
 	if err != nil {
 		return n.fsys.toErrno("release "+h.path, err)
@@ -398,7 +418,8 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 		return nil, n.fsys.toErrno("mkdir "+p, err)
 	}
 	n.fsys.attrs.put(p, a)
-	n.fsys.invalidateDir(dir)
+	n.fsys.dirs.add(dir, fuse.DirEntry{Name: name, Mode: syscall.S_IFDIR})
+	n.fsys.dirs.seed(p)
 	a.Fill(&out.Attr)
 	return n.childInode(ctx, name, a), 0
 }
@@ -431,7 +452,7 @@ func (n *Node) Rmdir(ctx context.Context, name string) syscall.Errno {
 	n.fsys.attrs.invalidatePrefix(p)
 	n.fsys.attrs.putNegative(p)
 	n.fsys.dirs.invalidatePrefix(p)
-	n.fsys.invalidateDir(dir)
+	n.fsys.dirs.remove(dir, name)
 	return 0
 }
 
@@ -459,7 +480,7 @@ func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 	n.fsys.clearPending(dir, name)
 	n.fsys.attrs.putNegative(p)
-	n.fsys.invalidateDir(dir)
+	n.fsys.dirs.remove(dir, name)
 	return 0
 }
 
@@ -484,7 +505,7 @@ func (n *Node) Symlink(ctx context.Context, target, name string, out *fuse.Entry
 		return nil, n.fsys.toErrno("symlink "+p, err)
 	}
 	n.fsys.attrs.put(p, a)
-	n.fsys.invalidateDir(dir)
+	n.fsys.dirs.add(dir, fuse.DirEntry{Name: name, Mode: syscall.S_IFLNK})
 	a.Fill(&out.Attr)
 	return n.childInode(ctx, name, a), 0
 }
@@ -663,8 +684,8 @@ func (f *FS) renameFile(ctx context.Context, oldPath, newPath string, a *Attr) e
 	f.attrs.putNegative(oldPath)
 	f.attrs.put(newPath, &moved)
 	f.clearPending(parentOf(oldPath), baseOf(oldPath))
-	f.invalidateDir(parentOf(oldPath))
-	f.invalidateDir(parentOf(newPath))
+	f.dirs.remove(parentOf(oldPath), baseOf(oldPath))
+	f.dirs.add(parentOf(newPath), fuse.DirEntry{Name: baseOf(newPath), Mode: moved.Mode & syscall.S_IFMT})
 	return nil
 }
 
@@ -737,8 +758,8 @@ func (f *FS) renameDir(ctx context.Context, oldPath, newPath string) error {
 	f.dirs.invalidatePrefix(oldPath)
 	f.dirs.invalidatePrefix(newPath)
 	f.clearPendingPrefix(oldPath)
-	f.invalidateDir(parentOf(oldPath))
-	f.invalidateDir(parentOf(newPath))
+	f.dirs.remove(parentOf(oldPath), baseOf(oldPath))
+	f.dirs.add(parentOf(newPath), fuse.DirEntry{Name: baseOf(newPath), Mode: syscall.S_IFDIR})
 	return nil
 }
 

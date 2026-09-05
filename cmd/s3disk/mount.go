@@ -85,7 +85,11 @@ func newMountFlags() *mountFlags {
 	f.DurationVar(&cfg.DirtyTimeout, "dirty-timeout", cfg.DirtyTimeout, "upload a file that has been dirty this long even if still open")
 	f.StringVar(&m.multipart, "multipart-threshold", "16M", "object size above which multipart upload is used")
 	f.StringVar(&m.partSize, "part-size", "16M", "multipart upload part size")
-	f.IntVar(&cfg.UploadConcurrency, "upload-concurrency", cfg.UploadConcurrency, "parallel part uploads")
+	f.IntVar(&cfg.UploadConcurrency, "upload-concurrency", cfg.UploadConcurrency, "parallel part uploads for one object")
+	f.IntVar(&cfg.UploadWorkers, "upload-workers", cfg.UploadWorkers, "objects uploaded at once during write-back")
+	f.BoolVar(&cfg.AsyncWriteback, "async-writeback", false,
+		"let close() return before the upload finishes; the file is stored within --dirty-timeout, "+
+			"and recovered from the local cache if the mount dies first")
 
 	f.BoolVar(&cfg.ReadOnly, "read-only", false, "mount read-only")
 	f.BoolVar(&cfg.AllowOther, "allow-other", envBool("S3DISK_ALLOW_OTHER", false), "let other users access the mount")

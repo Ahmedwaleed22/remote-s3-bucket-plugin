@@ -63,18 +63,20 @@ func New(ctx context.Context, cfg *config.Config, logf func(string, ...any)) (*F
 		started: time.Now(),
 	}
 	f.cache, err = cache.New(cache.Options{
-		Dir:          cfg.CacheDir,
-		Identity:     cfg.Identity(),
-		BlockSize:    cfg.BlockSize,
-		MaxBytes:     cfg.CacheSize,
-		Readahead:    cfg.Readahead,
-		DirtyTimeout: cfg.DirtyTimeout,
-		Persist:      cfg.PersistCache,
-		ReadOnly:     cfg.ReadOnly,
-		Fetch:        f.fetchRange,
-		Upload:       f.uploadObject,
-		OnUploaded:   f.onUploaded,
-		Log:          logf,
+		Dir:            cfg.CacheDir,
+		Identity:       cfg.Identity(),
+		BlockSize:      cfg.BlockSize,
+		MaxBytes:       cfg.CacheSize,
+		Readahead:      cfg.Readahead,
+		DirtyTimeout:   cfg.DirtyTimeout,
+		AsyncWriteback: cfg.AsyncWriteback,
+		UploadWorkers:  cfg.UploadWorkers,
+		Persist:        cfg.PersistCache,
+		ReadOnly:       cfg.ReadOnly,
+		Fetch:          f.fetchRange,
+		Upload:         f.uploadObject,
+		OnUploaded:     f.onUploaded,
+		Log:            logf,
 	})
 	if err != nil {
 		return nil, err
@@ -140,10 +142,11 @@ func (f *FS) onUploaded(key string, size int64, etag string, mtime time.Time, cr
 	f.clearPending(dir, path.Base(p))
 	if created {
 		// A listing taken while this file was still local-only does not contain
-		// it, and the file has just stopped being local-only. Without dropping
-		// that listing the file would vanish from readdir — permanently, on an
-		// exclusive mount, where listings do not expire.
-		f.invalidateDir(dir)
+		// it, and the file has just stopped being local-only — so without this
+		// the file would vanish from readdir once its pending marker cleared.
+		// Recording the name keeps the listing usable; dropping it would cost
+		// a re-listing for every file a build writes.
+		f.dirs.add(dir, fuse.DirEntry{Name: path.Base(p), Mode: syscall.S_IFREG})
 	}
 }
 
