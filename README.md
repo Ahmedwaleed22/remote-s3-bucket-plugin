@@ -95,6 +95,13 @@ The image is ~30 MB and runs three ways:
 ### On a host
 
 ```bash
+go install github.com/Ahmedwaleed22/remote-s3-bucket-plugin/cmd/s3disk@latest
+```
+
+or, from a checkout, which also registers the `mount(8)` helper and the
+systemd unit:
+
+```bash
 sudo ./install.sh              # builds and installs to /usr/local
 s3disk doctor s3://my-bucket   # check FUSE, credentials and access
 ```
@@ -312,6 +319,15 @@ which is where the cost was — just by s3disk rather than by the kernel.
 (`S3DISK_EXCLUSIVE=true`), since an image invocation names one bucket for one
 container. Set `-e S3DISK_EXCLUSIVE=false` if something else writes to the same
 prefix at the same time.
+
+## As a Remote application
+
+s3disk ships as a one-click image in Remote's Applications tab, where it
+installs into the project's own container as a `tool`: no port, no proxy
+device, just the bucket mounted at a path inside the workspace. The catalog
+entry is `installable-images/s3disk/` in the Remote repository; installing it
+runs the same `s3disk mount` under a systemd unit, so the tab's stop, start and
+uninstall map onto the mount.
 
 ## Interoperability
 
