@@ -1,0 +1,84 @@
+# s3disk with docker compose.
+#
+#   docker compose --profile agent run --rm agent
+#
+# Two patterns are shown:
+#
+#   agent    — the recommended one. The project lives in S3, s3disk mounts it
+#              inside the container, and the tooling in that container sees an
+#              ordinary directory at /workspace.
+#
+#   s3disk   — a standalone mount that stays up. Other containers can share it
+#              only if the mount is propagated through the host (see the notes
+#              on `propagation: rshared` below); running the tools in the same
+#              container as the mount is simpler and more reliable.
+
+services:
+  # ---------------------------------------------------------------- agent mode
+  agent:
+    profiles: ["agent"]
+    build:
+      context: .
+      dockerfile: examples/agent.Dockerfile
+    environment:
+      S3DISK_BUCKET: "${S3DISK_BUCKET:?set S3DISK_BUCKET, e.g. s3://my-bucket/project}"
+      S3DISK_MOUNTPOINT: /workspace
+      S3DISK_ENDPOINT: "${S3DISK_ENDPOINT:-}"
+      S3DISK_PATH_STYLE: "${S3DISK_PATH_STYLE:-}"
+      S3DISK_MOUNT_ARGS: "${S3DISK_MOUNT_ARGS:-}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+    devices: ["/dev/fuse"]
+    cap_add: ["SYS_ADMIN"]
+    security_opt: ["apparmor=unconfined"]
+    volumes:
+      # Keeping the cache on a volume means a restart starts warm instead of
+      # re-downloading the whole project.
+      - s3disk-cache:/var/cache/s3disk
+    # Give in-flight uploads time to finish when the container is stopped.
+    stop_grace_period: 2m
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+  # ------------------------------------------------------------ standalone mode
+  s3disk:
+    profiles: ["mount"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: s3disk:latest
+    environment:
+      S3DISK_BUCKET: "${S3DISK_BUCKET:?set S3DISK_BUCKET, e.g. s3://my-bucket/project}"
+      S3DISK_MOUNTPOINT: /workspace
+      S3DISK_ENDPOINT: "${S3DISK_ENDPOINT:-}"
+      S3DISK_PATH_STYLE: "${S3DISK_PATH_STYLE:-}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+    devices: ["/dev/fuse"]
+    cap_add: ["SYS_ADMIN"]
+    security_opt: ["apparmor=unconfined"]
+    volumes:
+      - s3disk-cache:/var/cache/s3disk
+      # To share this mount with other containers, bind a host directory here
+      # with rshared propagation and mount the same host path in the consumer:
+      #   - type: bind
+      #     source: /mnt/s3
+      #     target: /workspace
+      #     bind: { propagation: rshared }
+      # The host directory must itself be a shared mount:
+      #   sudo mount --make-rshared /mnt/s3
+    stop_grace_period: 2m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "s3disk", "status", "/workspace"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  s3disk-cache:

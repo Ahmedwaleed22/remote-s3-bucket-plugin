@@ -1,0 +1,35 @@
+# Systemd unit for one s3disk mount.
+#
+#   1. Write /etc/s3disk/project.conf (see packaging/example.conf).
+#   2. systemctl enable --now s3disk@project
+#
+# The instance name is the config file's basename.
+
+[Unit]
+Description=s3disk mount (%i)
+Documentation=https://github.com/Ahmedwaleed22/remote-s3-bucket-plugin
+After=network-online.target
+Wants=network-online.target
+# Anything that reads the mount should order itself after this unit.
+Before=remote-fs.target
+AssertPathExists=/etc/s3disk/%i.conf
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/s3disk/%i.conf
+ExecStartPre=/bin/mkdir -p ${S3DISK_MOUNTPOINT}
+ExecStart=/usr/local/bin/s3disk mount ${S3DISK_BUCKET} ${S3DISK_MOUNTPOINT} --foreground $S3DISK_MOUNT_ARGS
+# Flush and unmount cleanly; s3disk turns SIGTERM into "upload everything, then
+# detach", so the stop timeout should cover the largest pending upload.
+ExecStop=/usr/local/bin/s3disk umount ${S3DISK_MOUNTPOINT}
+TimeoutStopSec=300
+Restart=on-failure
+RestartSec=5s
+
+# Clear a dead FUSE mount, which would otherwise block every reader. Only when
+# one is actually left behind: after a clean stop there is nothing to unmount,
+# and running it unconditionally logs a confusing failure every time.
+ExecStopPost=-/bin/sh -c 'mountpoint -q "$S3DISK_MOUNTPOINT" && fusermount3 -uz "$S3DISK_MOUNTPOINT"'
+
+[Install]
+WantedBy=multi-user.target
